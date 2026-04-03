@@ -660,6 +660,26 @@ void CK3::World::shatterEmpires(const Configuration& theConfiguration) const
 	}
 	const auto& allTitles = titles.getTitles();
 
+	int releasedCount = 0;
+
+	for (const auto& hegemony: allTitles)
+	{
+		// First pass we have to deal with hegemonies.
+
+		if (theConfiguration.getShatterEmpires() == Configuration::SHATTER_EMPIRES::CUSTOM && !shatterEmpiresMapper.isEmpireShatterable(hegemony.first))
+			continue; // Only considering those listed.
+		if (hegemony.second->getLevel() != LEVEL::HEGEMONY && theConfiguration.getShatterEmpires() != Configuration::SHATTER_EMPIRES::CUSTOM)
+			continue; // Otherwise only hegemonies.
+		if (hegemony.second->getDFVassals().empty())
+			continue; // Not relevant.
+		if (!hegemony.second->getHolder())
+			continue; // No holder.
+
+		releasedCount = releasedCount + shatterEmpire(theConfiguration, hegemony, shatterKingdoms);
+
+		Log(LogLevel::Info) << "<> " << hegemony.first << " shattered, " << releasedCount << " members released.";
+	}
+	releasedCount = 0;
 	for (const auto& empire: allTitles)
 	{
 		if (hreTitle && empire.first == hreTitle->first)
@@ -673,106 +693,127 @@ void CK3::World::shatterEmpires(const Configuration& theConfiguration) const
 		if (!empire.second->getHolder())
 			continue; // No holder.
 
-		std::map<long long, std::shared_ptr<Character>> brickedPeople; // these are people we need to fix.
-		// First we are composing a list of all members.
-		std::map<long long, std::shared_ptr<Title>> members;
-		std::map<long long, std::shared_ptr<Title>> brickList;
-		for (const auto& vassal: empire.second->getDFVassals())
-		{
-			if (!vassal.second)
-			{
-				Log(LogLevel::Warning) << "Shattering vassal " << vassal.first << " that isn't linked! Skipping!";
-				continue;
-			}
-			if (vassal.second->getLevel() == LEVEL::DUCHY || vassal.second->getLevel() == LEVEL::COUNTY)
-			{
-				members.insert(vassal);
-			}
-			else if (vassal.second->getLevel() == LEVEL::KINGDOM)
-			{
-				if (shatterKingdoms && vassal.second->getName() != "k_papal_state" && vassal.second->getName() != "k_orthodox")
-				{ // hard override for special empire members
+		releasedCount = releasedCount + shatterEmpire(theConfiguration, empire, shatterKingdoms);
 
-					for (const auto& vassalVassal: vassal.second->getDFVassals())
-					{
-						if (!vassalVassal.second)
-							Log(LogLevel::Warning) << "VassalVassal " << vassalVassal.first << " has no link!";
-						else
-							members.insert(vassalVassal);
-					}
-					// Bricking the kingdom
-					if (!vassal.second->getHolder()->second)
-					{
-						Log(LogLevel::Warning) << "Vassal " << vassal.second->getName() << " has no holder linked!";
-					}
+		Log(LogLevel::Info) << "<> " << empire.first << " shattered, " << releasedCount << " members released.";
+	}
+}
+
+int CK3::World::shatterEmpire(const Configuration& theConfiguration,
+	 const std::pair<std::string, std::shared_ptr<Title>>& theEmpire,
+	 bool shatterKingdoms) const
+{
+	std::map<long long, std::shared_ptr<Character>> brickedPeople; // these are people we need to fix.
+	// First we are composing a list of all members.
+	std::map<long long, std::shared_ptr<Title>> members;
+	std::map<long long, std::shared_ptr<Title>> brickList;
+	for (const auto& vassal: theEmpire.second->getDFVassals())
+	{
+
+		if (!vassal.second)
+		{
+			Log(LogLevel::Warning) << "Shattering vassal " << vassal.first << " that isn't linked! Skipping!";
+			continue;
+		}
+		if (vassal.second->getLevel() == LEVEL::DUCHY || vassal.second->getLevel() == LEVEL::COUNTY)
+		{
+			members.insert(vassal);
+		}
+		else if (vassal.second->getLevel() == LEVEL::EMPIRE)
+		{
+			// We're shattering a hegemony apparently.
+			int releasedCount = shatterEmpire(theConfiguration, std::pair(vassal.second->getName(), vassal.second), shatterKingdoms);
+
+			Log(LogLevel::Info) << "<> " << theEmpire.first << " shattered, " << releasedCount << " members released.";
+		}
+		else if (vassal.second->getLevel() == LEVEL::KINGDOM)
+		{
+			if (shatterKingdoms && vassal.second->getName() != "k_papal_state" && vassal.second->getName() != "k_orthodox")
+			{ // hard override for special empire members
+
+				for (const auto& vassalVassal: vassal.second->getDFVassals())
+				{
+					if (!vassalVassal.second)
+						Log(LogLevel::Warning) << "VassalVassal " << vassalVassal.first << " has no link!";
 					else
-					{
-						brickedPeople.insert(*vassal.second->getHolder());
-					}
-					brickList.insert(vassal);
+						members.insert(vassalVassal);
+				}
+				// Bricking the kingdom
+				if (!vassal.second->getHolder()->second)
+				{
+					Log(LogLevel::Warning) << "Vassal " << vassal.second->getName() << " has no holder linked!";
 				}
 				else
 				{
-					// Not shattering kingdoms.
-					members.insert(vassal);
+					brickedPeople.insert(*vassal.second->getHolder());
 				}
+				brickList.insert(vassal);
 			}
-			else if (vassal.second->getLevel() != LEVEL::BARONY)
+			else
 			{
-				Log(LogLevel::Warning) << "Unrecognized vassal level: " << vassal.first;
+				// Not shattering kingdoms.
+				members.insert(vassal);
 			}
 		}
-
-		for (const auto& brick: brickList)
-			brick.second->brickTitle();
-
-		// grant independence to ex-vassals.
-		for (const auto& member: members)
+		else if (vassal.second->getLevel() != LEVEL::BARONY)
 		{
-			member.second->grantIndependence();
+			Log(LogLevel::Warning) << "Unrecognized vassal level: " << vassal.first;
 		}
-
-		// Finally, dispose of the shell.
-		brickedPeople.insert(*empire.second->getHolder());
-		empire.second->brickTitle();
-
-		// Same as with HREmperor, we need to roll back counties or duchies that got released from ex-emperor himself or kings.
-		for (const auto& afflictedPerson: brickedPeople)
-		{
-			if (!afflictedPerson.second)
-			{
-				Log(LogLevel::Warning) << "Character " << afflictedPerson.first << " has no link! Cannot fix them.";
-				continue;
-			}
-			else if (!afflictedPerson.second->getCharacterDomain())
-			{
-				Log(LogLevel::Warning) << "Character " << afflictedPerson.first << " has no link to domain! Cannot fix them.";
-				continue;
-			}
-			else if (afflictedPerson.second->getCharacterDomain()->getDomain().empty())
-			{
-				continue;
-			}
-
-			const auto& holderDomain = afflictedPerson.second->getCharacterDomain()->getDomain();
-			const auto holderTitles = std::map(holderDomain.begin(), holderDomain.end());
-
-			for (const auto& holderTitle: holderDomain)
-			{
-				// does this title have a DJLiege that is was in his domain, and survived bricking, but does not have DFLiege since it was granted independence?
-				if (!holderTitle.second->getDFLiege() && holderTitle.second->getDJLiege() && holderTitle.second->getDJLiege()->second->getHolder() &&
-					 holderTitle.second->getDJLiege()->second->getHolder()->first == afflictedPerson.first && holderTitles.count(holderTitle.first))
-				{
-					// fix this title.
-					const auto& djLiege = holderTitle.second->getDJLiege();
-					djLiege->second->addDFVassals(std::map{holderTitle});
-					holderTitle.second->loadDFLiege(*djLiege);
-				}
-			}
-		}
-
-		Log(LogLevel::Info) << "<> " << empire.first << " shattered, " << members.size() << " members released.";
 	}
+
+	for (const auto& brick: brickList)
+		brick.second->brickTitle();
+
+	// grant independence to ex-vassals.
+	for (const auto& member: members)
+	{
+		member.second->grantIndependence();
+	}
+
+	// Finally, dispose of the shell.
+	brickedPeople.insert(*theEmpire.second->getHolder());
+	theEmpire.second->brickTitle();
+
+	// Same as with HREmperor, we need to roll back counties or duchies that got released from ex-emperor himself or kings.
+	for (const auto& afflictedPerson: brickedPeople)
+	{
+		if (!afflictedPerson.second)
+		{
+			Log(LogLevel::Warning) << "Character " << afflictedPerson.first << " has no link! Cannot fix them.";
+			continue;
+		}
+		else if (!afflictedPerson.second->getCharacterDomain())
+		{
+			Log(LogLevel::Warning) << "Character " << afflictedPerson.first << " has no link to domain! Cannot fix them.";
+			continue;
+		}
+		else if (afflictedPerson.second->getCharacterDomain()->getDomain().empty())
+		{
+			continue;
+		}
+
+		const auto& holderDomain = afflictedPerson.second->getCharacterDomain()->getDomain();
+		const auto holderTitles = std::map(holderDomain.begin(), holderDomain.end());
+
+		for (const auto& holderTitle: holderDomain)
+		{
+			if (!holderTitle.second)
+				continue; // No comment.
+
+			// does this title have a DJLiege that is was in his domain, and survived bricking, but does not have DFLiege since it was granted independence?
+			if (!holderTitle.second->getDFLiege() && holderTitle.second->getDJLiege() && holderTitle.second->getDJLiege()->second &&
+				 holderTitle.second->getDJLiege()->second->getHolder() && holderTitle.second->getDJLiege()->second->getHolder()->first == afflictedPerson.first &&
+				 holderTitles.count(holderTitle.first))
+			{
+				// fix this title.
+				const auto& djLiege = holderTitle.second->getDJLiege();
+				djLiege->second->addDFVassals(std::map{holderTitle});
+				holderTitle.second->loadDFLiege(*djLiege);
+			}
+		}
+	}
+
+	return static_cast<int>(members.size());
 }
 
 void CK3::World::filterIndependentTitles()
@@ -1108,7 +1149,7 @@ void CK3::World::setElectors()
 				if (regItr->second.count(electorTitle.second->getName()) && !electorTitle.second->getOwnedDFCounties().empty())
 				{
 					electorTitle.second->setElectorate();
-					Log(LogLevel::Debug) << "Setting electorate: " << electorTitle.second->getName();
+					Log(LogLevel::Info) << "Setting electorate: " << electorTitle.second->getName();
 					counter++;
 					break;
 				}
@@ -1123,7 +1164,7 @@ void CK3::World::setElectors()
 				if (!title.second->getOwnedDFCounties().empty())
 				{
 					title.second->setElectorate();
-					Log(LogLevel::Debug) << "Setting electorate: " << title.first;
+					Log(LogLevel::Info) << "Setting electorate: " << title.first;
 					counter++;
 					break;
 				}
